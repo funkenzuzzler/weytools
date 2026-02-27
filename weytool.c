@@ -11,6 +11,8 @@
 #include <sys/stat.h>
 
 typedef enum {
+	HP_CMD_WRITEGRAPH=0xa2,
+	HP_CMD_READGRAPH=0xa3,
 	HP_CMD_WRITEFILE=0xa5,
 	HP_CMD_READFILE=0xa6,
 	HP_CMD_DELETE=0xa8,
@@ -74,6 +76,13 @@ struct reply_fileop {
 struct reply_fileread {
 	char name[32];
 	uint32_t size;
+} __attribute__((packed));
+
+struct request_graphfileread {
+	uint8_t cmd;
+	uint16_t magic;
+	uint16_t subindex;
+	uint32_t maxsize;
 } __attribute__((packed));
 
 static int open_serial(char *device, int baud)
@@ -178,6 +187,87 @@ static int listfiles(int fd)
 	return 0;
 }
 
+static int readgraphfile(int fd, int index, int subindex)
+{
+	struct request_graphfileread request;
+	int outfd, ret = -1;
+	char buf[512];
+	uint8_t status;
+	uint32_t size;
+	ssize_t len;
+	char name[32];
+	char dummy[8];
+	int total;
+
+	switch (index) {
+	case 4:
+		request.magic = htons(0xa054);
+		request.subindex = htons((subindex + 0x70) << 8);
+		sprintf(name, "BMP%d.BMP", subindex);
+		break;
+	case 6:
+		request.magic = htons(0x0101);
+		request.subindex = htons(subindex);
+		strcpy(name, "Colorparm.par");
+		break;
+	default:
+		return -1;
+	}
+
+	request.cmd = HP_CMD_READGRAPH;
+	request.maxsize = htonl(1000000);
+	if (write(fd, &request, sizeof(request)) == -1) {
+		fprintf(stderr, "%s: send request: %m\n", __func__);
+		return -1;
+	}
+
+	if (read_serial(fd, &status, sizeof(status)) == -1) {
+		fprintf(stderr, "%s: receive header: %m\n", __func__);
+		return -1;
+	}
+
+	if (status != HP_CMD_READGRAPH) {
+		fprintf(stderr, "%s: failed: %02x\n", __func__, ntohs(status));
+		return -1;
+	}
+
+	/* read remaining 3 bytes before size */
+	if (read_serial(fd, dummy, 4) == -1) {
+		fprintf(stderr, "%s: receive header: %m\n", __func__);
+		return -1;
+	}
+
+	if (read_serial(fd, &size, sizeof(size)) == -1) {
+		fprintf(stderr, "%s: receive header: %m\n", __func__);
+		return -1;
+	}
+
+	size = ntohl(size);
+	total = size;
+	printf("%s: %d bytes\n", name, size);
+
+	outfd = open(name, O_RDWR|O_CREAT|O_TRUNC, 0644);
+	if (outfd == -1) {
+		fprintf(stderr, "%s: failed to create output file %s: %m\n", __func__, name);
+		return -1;
+	}
+
+	do {
+		len = read_serial(fd, buf, MIN(sizeof(buf), size));
+		if (len == -1)
+			goto out;
+		if (write(outfd, buf, len) == -1)
+			goto out;
+		size -= len;
+		printf("%5.1f%% done\r", ((float)(total - size) / (float)total) * 100);
+	} while(size > 0);
+	printf("\n");
+	ret = 0;
+out:
+	close(outfd);
+	return ret;
+}
+
 static int readfile(int fd, char *spec)
 {
 	struct request_fileread request;
@@ -191,6 +281,9 @@ static int readfile(int fd, char *spec)
 		fprintf(stderr, "%s: invalid spec: %s\n", __func__, spec);
 		return -1;
 	}
+
+	if (index == 4 || index == 6)
+		return readgraphfile(fd, index, subindex);
 
 	request.index = htons(index);
 	request.subindex = htons(subindex);

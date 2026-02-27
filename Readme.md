@@ -101,6 +101,21 @@ This will upload Macros.mac at index 10, subindex 0:
  $ ./weytool -D /dev/ttyUSB2 -w 10,0,Macros.mac
  $
  ```
+### Upload icons to keyboard
+
+Default icons in the keyboard are:
+```
+PC bitmap, Windows 3.x format, 80 x 70 x 8, image size 5600, resolution 2835 x 2835 px/m, cbSize 6678, bits offset 1078
+```
+
+Custom icons can be uploaded with:
+```
+./weytool -D /dev/ttyUSB2 -w 5,22,icon.bmp
+```
+
+This example would upload icon.bmp to Icon slot 22. If there's an internal
+icon present, it will no longer be available until you delete the custom
+icon again.
 
 ## Notes from reverse engineering
 HPA commands:
