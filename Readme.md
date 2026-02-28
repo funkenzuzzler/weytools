@@ -120,8 +120,16 @@ icon again.
 ## Notes from reverse engineering
 HPA commands:
 ```
-74 XX                                     set LCD brightness, 0xff - max 0 min
+70 XX                                     clears some flag (sound related?)
+72 XX                                     accepts 0-3, unknown
+73                                        unknown
+74 XX                                     set LCD brightness, 0xff - max, 0xfe restore, 0 min
+75 XX                                     supposed to print a character?
 76 00                                     clears forground
+77 00                                     yet another clear screen
+78 LL                                     set first page of layer LL and save
+79 PP                                     set page PP of current Layer
+7a RR GG BB?                              some color fill
 7d RS                                     set res line R - line, S - state mask
 7a RR GG BB                               fill lcd
 a2 <magic:2> <idx:2> <len:4>              Download graphics / colorparm?
@@ -129,31 +137,23 @@ a2 <magic:2> <idx:2> <len:4>              Download graphics / colorparm?
                                                   0101 COLORPARM
                                                   0901 SYSTEM / USERSETUP
 a3
-a4
+a4 00                                     Read 16 bytes config
+a4 01                                     Read full config
 a5 <idx:2> <subidx:2> <filename:32> <len:4> <data> Write file
 a6 <idx:2> <subidx:2>                     Read file, FF = File Id, 1 - Systemsetup, 2 Usermenu
-a7 <idx:2>                              
+a7 <idx:2>
 a8 <idx:2> <subidx:2>                     Delete file
 a9 00 00 00                               Get Directory listing
-7f e9                                     get module versions
-7f ee go-DynBl                            start dynamic bootloader
-7f f0 mode-eth                            terminal mode eth
-7f e0 gMk_eLeCtRoNiC-DeSiGn_gMbH-WeRnB    unlock special functions
-7f 40                                     connector box update?
-7f 5c                                     test status
-7f 5d                                     info page
-7f 5a                                     dump kct file
-7f 5b                                     dump user text page
-7f 5c                                     dump pin file
-7f 5e                                     dump macros
-7f 5f                                     dump pin pke file
-7f 60                                     write bmp file
-7f 30 XX <null terminated string>         print text on lcd
+
 7f 10 XX YPOS XPOS                        gotoxy
 7f 11 XX <bitmask>                        0x01 - inverted, 0x10 large
-7f 12 XX small font size
-7f 13 XX ignored
-7f 14 XX <Layer + Page:2 bits>            Switch layer / page, Layer 70-73 graphics
+7f 12 XX                                  0x02 - normal font size, other = small
+7f 13 XX                                  ignored
+7f 14 LL PP                               Switch layer = LL / page = PP, Page 70-73 graphics
+7f 15 LL PP                               clear page PP of layer LL
+7f 16 SS DD                               copy layer SS to layer DD
+7f 17                                     ignored
+7f 18 XX XX                               Yet another layer switch
 7f 19 <num>                               Attach to WS, 0x10 detach
 7f 20 LED STATE                           Set Led State, 1 - Green, 2 Red
                                           00 - CAPS
@@ -161,7 +161,42 @@ a9 00 00 00                               Get Directory listing
                                           02 - Scroll Lock
                                           03 - Prev/Next
                                           04 - Num Lock
-:
+7f 30 XX <null terminated string>         print text on lcd
+7f 40                                     connector box update?
+7f 41 VV PP                               beep, VV = 0..11 Volume, 255 = User set volume, PP = pattern
+7f 52                                     dump layer config
+7f 5a                                     dump kct file
+7f 5b                                     dump user text page
+7f 5c                                     dump pin file
+7f 5c                                     test status
+7f 5d                                     info page
+7f 5e                                     dump macros
+7f 5f                                     dump pin pke file
+7f 60                                     write bmp file
+7f e0 gMk_eLeCtRoNiC-DeSiGn_gMbH-WeRnB    unlock special functions
+7f e2                                     returns display brightness
+7f e3 31 xx                               unknown, some fifo i/o
+7f e4 31 c0 02                            reboot keyboard
+7f e5                                     returns 7f e5 1a
+7f e7 2f                                  delete icon files
+7f e7 0e XX                               LED test
+7f e7 13                                  delete systemconfig + kct
+7f e7 14                                  delete systemconfig + userconfig
+7f e7 15                                  delete macroconfig
+7f e7 16                                  delete bitmaps
+7f e7 17                                  delete vssemu layer
+7f e7 18                                  ignored
+7f e8                                     keyboard ID; returns '1' for MK06, 'P' for EK11
+7f e9                                     get module versions
+7f ea ID                                  start test id (only reinstall fs?, seems to need a unlock)
+7f eb
+7f ec <4k data>                           write product data
+7f ee go-DynBl                            start dynamic bootloader
+7f f0 mode-eth                            terminal mode eth
+
+
+
+7f 21 00                                  return keyboard language
 ```
 
 ## Default Pins
