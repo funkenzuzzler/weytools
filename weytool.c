@@ -9,6 +9,13 @@
 #include <arpa/inet.h>
 #include <sys/param.h>
 #include <sys/stat.h>
+#include <libusb-1.0/libusb.h>
+#include <errno.h>
+
+static int kbfd = -1;
+static int verbose;
+
+libusb_device_handle *usbdev;
 
 typedef enum {
 	HP_CMD_WRITEGRAPH=0xa2,
@@ -27,6 +34,7 @@ struct option options[] = {
 	{ "read", required_argument,   0, 'r' },
 	{ "delete", required_argument, 0, 'd' },
 	{ "reboot", no_argument,       0, 'R' },
+	{ "verbose", no_argument,      0, 'v' },
 };
 
 struct cmd_listfiles {
@@ -85,6 +93,40 @@ struct request_graphfileread {
 	uint16_t subindex;
 	uint32_t maxsize;
 } __attribute__((packed));
+
+
+static void hexdump_line(char *out, uint8_t *buf, size_t len)
+{
+	for (size_t i = 0; i < 16; i++) {
+		if (!(i % 4))
+			*out++ = ' ';
+		if (i < len)
+			sprintf(out, "%02X ", buf[i]);
+		else
+			memset(out, ' ', 3);
+		out += 3;
+	}
+
+	for (size_t i = 0; i < len; i++) {
+		char c = buf[i];
+		if (c < 0x20)
+			c = '.';
+		sprintf(out++, "%c", c);
+	}
+}
+
+void hexdump(char *prefix, void *buf, size_t len)
+{
+	char out[128] = { 0 };
+
+	if (!verbose)
+		return;
+
+	for (size_t offset = 0; offset < len; offset += 16) {
+		hexdump_line(out, buf + offset, MIN(len - offset, 16));
+		fprintf(stderr, "%s: %04x: %s\n", prefix, (int)offset, out);
+	}
+}
 
 static int open_serial(char *device, int baud)
 {
@@ -145,19 +187,82 @@ static ssize_t read_serial(int fd, void *buf, ssize_t count)
 	return total;
 }
 
-static int listfiles(int fd)
+static int read_keyboard(void *buf, size_t count)
+{
+	static uint8_t tmpbuf[4096];
+	static size_t rxavailable;
+	int sent, ret;
+
+	if (kbfd != -1)
+		return read_serial(kbfd, buf, count);
+
+	while(rxavailable < count) {
+		ret = libusb_bulk_transfer(usbdev, 0x85, tmpbuf + rxavailable,
+					   sizeof(tmpbuf) - rxavailable, &sent, 60000);
+		switch (ret) {
+		case LIBUSB_SUCCESS:
+			rxavailable += sent;
+			break;
+		default:
+			fprintf(stderr, "%s: %s\n", __func__, libusb_strerror(ret));
+			errno = EIO;
+			return -1;
+		}
+	}
+
+	rxavailable -= count;
+	memcpy(buf, tmpbuf, count);
+	hexdump("RX", buf, count);
+	memmove(tmpbuf, tmpbuf + count, rxavailable);
+	return count;
+}
+
+static int write_keyboard(void *buf, size_t count)
+{
+	int sent, ret, total = 0;
+
+	hexdump("TX", buf, count);
+	if (kbfd != -1)
+		return write(kbfd, buf, count);
+	do {
+		ret = libusb_bulk_transfer(usbdev, 0x06, buf, MIN(count, 64), &sent, 60000);
+		switch (ret) {
+		case LIBUSB_SUCCESS:
+			count -= sent;
+			buf += sent;
+			total += sent;
+			break;
+		default:
+			fprintf(stderr, "%s: %s, sent %d\n", __func__, libusb_strerror(ret), sent);
+			errno = EIO;
+			return -1;
+		}
+	} while(count);
+
+	return total;
+}
+
+static int enter_usb_mode(void)
+{
+	uint8_t dynblcmd[] = { 0x7f, 0xf0, 'm', 'o', 'd', 'e', '-', 'u', 's', 'b' };
+
+	return write_keyboard(dynblcmd, sizeof(dynblcmd));
+}
+
+
+static int listfiles(void)
 {
 	struct cmd_listfiles request = { .cmd = HP_CMD_LISTFILES, { 0 } };
 	struct reply_listfile reply;
 	struct fileentry *entries;
 	int count, pktlen;
 
-	if (write(fd, &request, sizeof(request)) == -1) {
+	if (write_keyboard(&request, sizeof(request)) == -1) {
 		fprintf(stderr, "%s: send request: %m\n", __func__);
 		return -1;
 	}
 
-	if (read_serial(fd, &reply, sizeof(reply)) == -1) {
+	if (read_keyboard(&reply, sizeof(reply)) == -1) {
 		fprintf(stderr, "%s: receive header: %m\n", __func__);
 		return -1;
 	}
@@ -175,7 +280,7 @@ static int listfiles(int fd)
 		return -1;
 	}
 
-	if (read_serial(fd, entries, pktlen) == -1) {
+	if (read_keyboard(entries, pktlen) == -1) {
 		fprintf(stderr, "%s: receive header: %m\n", __func__);
 		free(entries);
 		return -1;
@@ -188,7 +293,7 @@ static int listfiles(int fd)
 	return 0;
 }
 
-static int readgraphfile(int fd, int index, int subindex)
+static int readgraphfile(int index, int subindex)
 {
 	struct request_graphfileread request;
 	int outfd, ret = -1;
@@ -217,12 +322,12 @@ static int readgraphfile(int fd, int index, int subindex)
 
 	request.cmd = HP_CMD_READGRAPH;
 	request.maxsize = htonl(1000000);
-	if (write(fd, &request, sizeof(request)) == -1) {
+	if (write_keyboard(&request, sizeof(request)) == -1) {
 		fprintf(stderr, "%s: send request: %m\n", __func__);
 		return -1;
 	}
 
-	if (read_serial(fd, &status, sizeof(status)) == -1) {
+	if (read_keyboard(&status, sizeof(status)) == -1) {
 		fprintf(stderr, "%s: receive header: %m\n", __func__);
 		return -1;
 	}
@@ -233,12 +338,12 @@ static int readgraphfile(int fd, int index, int subindex)
 	}
 
 	/* read remaining 3 bytes before size */
-	if (read_serial(fd, dummy, 4) == -1) {
+	if (read_keyboard(dummy, 4) == -1) {
 		fprintf(stderr, "%s: receive header: %m\n", __func__);
 		return -1;
 	}
 
-	if (read_serial(fd, &size, sizeof(size)) == -1) {
+	if (read_keyboard(&size, sizeof(size)) == -1) {
 		fprintf(stderr, "%s: receive header: %m\n", __func__);
 		return -1;
 	}
@@ -254,7 +359,7 @@ static int readgraphfile(int fd, int index, int subindex)
 	}
 
 	do {
-		len = read_serial(fd, buf, MIN(sizeof(buf), size));
+		len = read_keyboard(buf, MIN(sizeof(buf), size));
 		if (len == -1)
 			goto out;
 		if (write(outfd, buf, len) == -1)
@@ -269,7 +374,7 @@ out:
 	return ret;
 }
 
-static int readfile(int fd, char *spec)
+static int readfile(char *spec)
 {
 	struct request_fileread request;
 	struct reply_fileop reply;
@@ -284,18 +389,18 @@ static int readfile(int fd, char *spec)
 	}
 
 	if (index == 4 || index == 6)
-		return readgraphfile(fd, index, subindex);
+		return readgraphfile(index, subindex);
 
 	request.index = htons(index);
 	request.subindex = htons(subindex);
 	request.cmd = HP_CMD_READFILE;
 
-	if (write(fd, &request, sizeof(request)) == -1) {
+	if (write_keyboard(&request, sizeof(request)) == -1) {
 		fprintf(stderr, "%s: send request: %m\n", __func__);
 		return -1;
 	}
 
-	if (read_serial(fd, &reply, sizeof(reply)) == -1) {
+	if (read_keyboard(&reply, sizeof(reply)) == -1) {
 		fprintf(stderr, "%s: receive header: %m\n", __func__);
 		return -1;
 	}
@@ -308,7 +413,7 @@ static int readfile(int fd, char *spec)
 	reply2.name[0] = ((uint8_t *)&reply.status)[0];
 	reply2.name[1] = ((uint8_t *)&reply.status)[1];
 
-	if (read_serial(fd, &reply2.name[2], sizeof(reply2)-2) == -1) {
+	if (read_keyboard(&reply2.name[2], sizeof(reply2)-2) == -1) {
 		fprintf(stderr, "%s: receive header2: %m\n", __func__);
 		return -1;
 	}
@@ -323,7 +428,7 @@ static int readfile(int fd, char *spec)
 	}
 
 	do {
-		len = read_serial(fd, buf, MIN(sizeof(buf), size));
+		len = read_keyboard(buf, MIN(sizeof(buf), size));
 		if (len == -1)
 			goto out;
 		if (write(outfd, buf, len) == -1)
@@ -336,7 +441,7 @@ out:
 	return ret;
 }
 
-static int deletefile(int fd, char *spec)
+static int deletefile(char *spec)
 {
 	struct request_filedelete request;
 	struct reply_fileop reply;
@@ -351,12 +456,12 @@ static int deletefile(int fd, char *spec)
 	request.subindex = htons(subindex);
 	request.cmd = HP_CMD_DELETE;
 
-	if (write(fd, &request, sizeof(request)) == -1) {
+	if (write_keyboard(&request, sizeof(request)) == -1) {
 		fprintf(stderr, "%s: send request: %m\n", __func__);
 		return -1;
 	}
 
-	if (read_serial(fd, &reply, sizeof(reply)) == -1) {
+	if (read_keyboard(&reply, sizeof(reply)) == -1) {
 		fprintf(stderr, "%s: receive header: %m\n", __func__);
 		return -1;
 	}
@@ -372,7 +477,7 @@ out:
 	return ret;
 }
 
-static int writefile(int fd, char *spec)
+static int writefile(char *spec)
 {
 	int index, subindex, ret = -1, infd;
 	struct request_filewrite request;
@@ -390,7 +495,7 @@ static int writefile(int fd, char *spec)
 		return -1;
 	}
 
-	if (strlen(request.filename) > 31) {
+	if (strlen(input) > 31) {
 		fprintf(stderr, "%s: filename %s too long\n", __func__, input);
 		return -1;
 	}
@@ -414,7 +519,7 @@ static int writefile(int fd, char *spec)
 	request.size = htonl(statbuf.st_size);
 	request.cmd = HP_CMD_WRITEFILE;
 
-	if (write(fd, &request, sizeof(request)) == -1) {
+	if (write_keyboard(&request, sizeof(request)) == -1) {
 		fprintf(stderr, "%s: failed to write request: %m\n", __func__);
 		goto out;
 	}
@@ -429,16 +534,17 @@ static int writefile(int fd, char *spec)
 		if (ret == 0)
 			break;
 
-		ret = write(fd, buf, ret);
+		ret = write_keyboard(buf, ret);
 		if (ret == -1) {
 			fprintf(stderr, "%s: send request: %m\n", __func__);
 			goto out;
 		}
+
 		total -= ret;
 		fprintf(stderr, "sent %d bytes, %ld remaining\n", ret, total);
 	} while(total > 0);
 
-	if (read_serial(fd, &reply,sizeof(reply)) == -1)
+	if (read_keyboard(&reply,sizeof(reply)) == -1)
 		goto out;
 
 	if (reply.cmd != HP_CMD_WRITEFILE || ntohs(reply.status) != 0xd000) {
@@ -452,104 +558,143 @@ out:
 	return ret;
 }
 
-static int reboot_kbd(int fd)
+static int reboot_kbd(void)
 {
-	const uint8_t cmd[] = { 0x7f, 0xe4, 0x31, 0xc0, 0x02 };
+	uint8_t cmd[] = { 0x7f, 0xe4, 0x31, 0xc0, 0x02 };
 
-	if (write(fd, cmd, sizeof(cmd)) == 1) {
+	if (write_keyboard(cmd, sizeof(cmd)) == 1) {
 		fprintf(stderr, "%s: %m\n", __func__);
 		return -1;
 	}
 	return 0;
 }
 
+static libusb_device_handle *open_keyboard_usb(struct libusb_context *ctx, int id)
+{
+	libusb_device_handle *dev = libusb_open_device_with_vid_pid(ctx, 0x0744, id);
+	int ret;
+
+	if (!dev) {
+		fprintf(stderr, "libusb_open_device_with_vid_pid failed\n");
+		return NULL;
+	}
+
+	libusb_set_configuration(dev, 1);
+	ret = libusb_claim_interface(dev, 1);
+	if (ret < 0) {
+		fprintf(stderr, "libusb_claim_interface failed: %d\n", ret);
+		return NULL;
+	}
+	return dev;
+}
+
 int main(int argc, char **argv)
 {
 	int list = 0, optidx, opt, baud = 115200;
 	char *device = NULL, *endp, *write = NULL, *read = NULL, *delete = NULL;
-	int ret = 1, fd, reboot = 0;
+	int ret = 1, reboot = 0;
+	struct libusb_context *ctx = NULL;
 
-	while ((opt = getopt_long(argc, argv, "RlD:d:b:w:r:", options, &optidx)) != -1) {
-		switch (opt) {
-		case 'D':
-			device = optarg;
-			break;
-		case 'b':
-			baud = strtoul(optarg, &endp, 10);
-			if (*endp) {
-				fprintf(stderr, "invalid baudrate: %s\n", optarg);
-				return 1;
-			}
-			break;
-		case 'l':
-			list = 1;
-			break;
-		case 'w':
-			write = optarg;
-			break;
-		case 'r':
-			read = optarg;
-			break;
-		case 'd':
-			delete = optarg;
-			break;
-		case 'R':
-			reboot = 1;
-			break;
-		case 'h':
-			fprintf(stderr, "%s: usage:%s <options>\n"
-				"-d, --device            serial device\n"
-				"-b, --baud,-b           baud rate\n"
-				"-l, --list              list files on keyboard\n"
-				"-w, --write <file>      upload file to keyboard\n"
-				"-r, --read <file>       download file from keyboard\n"
-				"-R, --reboot            reboot keyboard\n",
-				argv[0], argv[0]);
-			return 0;
-		default:
-			break;
-		}
-	}
+	while ((opt = getopt_long(argc, argv, "vRlD:d:b:w:r:", options, &optidx)) != -1) {
+		 switch (opt) {
+		 case 'D':
+			 device = optarg;
+			 break;
+		 case 'b':
+			 baud = strtoul(optarg, &endp, 10);
+			 if (*endp) {
+				 fprintf(stderr, "invalid baudrate: %s\n", optarg);
+				 return 1;
+			 }
+			 break;
+		 case 'l':
+			 list = 1;
+			 break;
+		 case 'w':
+			 write = optarg;
+			 break;
+		 case 'r':
+			 read = optarg;
+			 break;
+		 case 'd':
+			 delete = optarg;
+			 break;
+		 case 'v':
+			 verbose = 1;
+			 break;
+		 case 'R':
+			 reboot = 1;
+			 break;
+		 case 'h':
+			 fprintf(stderr, "%s: usage:%s <options>\n"
+				 "-d, --device            serial device\n"
+				 "-b, --baud,-b           baud rate\n"
+				 "-l, --list              list files on keyboard\n"
+				 "-w, --write <file>      upload file to keyboard\n"
+				 "-r, --read <file>       download file from keyboard\n"
+				 "-R, --reboot            reboot keyboard\n",
+				 argv[0], argv[0]);
+			 return 0;
+		 default:
+			 break;
+		 }
+	 }
 
-	/*
-	 * If the keyboard we're talking to is the keyboard control this pc,
-	 * we might block the keyboard before it could send the key up event.
-	 * This leads to repeated keypresses until we're done. Sleep for one
-	 * second to minimize the risk.
-	 */
+	 /*
+	  * If the keyboard we're talking to is the keyboard control this pc,
+	  * we might block the keyboard before it could send the key up event.
+	  * This leads to repeated keypresses until we're done. Sleep for one
+	  * second to minimize the risk.
+	  */
 	sleep(1);
 
 	if (!device) {
-		fprintf(stderr, "missing device name\n");
-		return 1;
+		/* no serial device give, try usb */
+		int ret = libusb_init(&ctx);
+		if (ret < 0) {
+			fprintf(stderr, "libusb_init failed: %s\n", libusb_strerror(ret));
+			return 1;
+		}
+		usbdev = open_keyboard_usb(ctx, 0x3f);
+		if (!usbdev)
+			goto out_release;
+		if (enter_usb_mode() == -1)
+			goto out_release;
+
+		sleep(1);
+	} else {
+		kbfd = open_serial(device, baud);
+		if (kbfd == -1)
+			return 1;
 	}
 
-	fd = open_serial(device, baud);
-	if (fd == -1)
-		return 1;
-
 	if (list) {
-		ret = listfiles(fd);
+		ret = listfiles();
+		goto out;
+	}
+
+	if (delete) {
+		ret = deletefile(delete);
 		goto out;
 	}
 
 	if (read) {
-		ret = readfile(fd, read);
+		ret = readfile(read);
 		goto out;
 	}
 
 	if (write) {
-		ret = writefile(fd, write);
-		goto out;
-	}
-	if (delete) {
-		ret = deletefile(fd, delete);
+		ret = writefile(write);
 		goto out;
 	}
 
 	if (reboot)
-		ret = reboot_kbd(fd);
+		ret = reboot_kbd();
+out_release:
+	if (ctx)
+		libusb_exit(ctx);
 out:
-	close(fd);
+	if (kbfd != -1)
+		close(kbfd);
 	return ret;
 }
