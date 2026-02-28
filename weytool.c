@@ -511,6 +511,14 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/*
+	 * If the keyboard we're talking to is the keyboard control this pc,
+	 * we might block the keyboard before it could send the key up event.
+	 * This leads to repeated keypresses until we're done. Sleep for one
+	 * second to minimize the risk.
+	 */
+	sleep(1);
+
 	if (!device) {
 		fprintf(stderr, "missing device name\n");
 		return 1;
