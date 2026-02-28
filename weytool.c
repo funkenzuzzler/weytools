@@ -25,7 +25,8 @@ struct option options[] = {
 	{ "list", no_argument,         0, 'l' },
 	{ "write", required_argument,  0, 'w' },
 	{ "read", required_argument,   0, 'r' },
-	{ "delete", required_argument, 0, 'd' }
+	{ "delete", required_argument, 0, 'd' },
+	{ "reboot", no_argument,       0, 'R' },
 };
 
 struct cmd_listfiles {
@@ -451,13 +452,24 @@ out:
 	return ret;
 }
 
+static int reboot_kbd(int fd)
+{
+	const uint8_t cmd[] = { 0x7f, 0xe4, 0x31, 0xc0, 0x02 };
+
+	if (write(fd, cmd, sizeof(cmd)) == 1) {
+		fprintf(stderr, "%s: %m\n", __func__);
+		return -1;
+	}
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	int list = 0, optidx, opt, baud = 115200;
 	char *device = NULL, *endp, *write = NULL, *read = NULL, *delete = NULL;
-	int ret = 1, fd;
+	int ret = 1, fd, reboot = 0;
 
-	while ((opt = getopt_long(argc, argv, "lD:d:b:w:r:", options, &optidx)) != -1) {
+	while ((opt = getopt_long(argc, argv, "RlD:d:b:w:r:", options, &optidx)) != -1) {
 		switch (opt) {
 		case 'D':
 			device = optarg;
@@ -481,13 +493,17 @@ int main(int argc, char **argv)
 		case 'd':
 			delete = optarg;
 			break;
+		case 'R':
+			reboot = 1;
+			break;
 		case 'h':
 			fprintf(stderr, "%s: usage:%s <options>\n"
 				"-d, --device            serial device\n"
 				"-b, --baud,-b           baud rate\n"
 				"-l, --list              list files on keyboard\n"
 				"-w, --write <file>      upload file to keyboard\n"
-				"-r, --read <file>       download file from keyboard\n",
+				"-r, --read <file>       download file from keyboard\n"
+				"-R, --reboot            reboot keyboard\n",
 				argv[0], argv[0]);
 			return 0;
 		default:
@@ -522,6 +538,9 @@ int main(int argc, char **argv)
 		ret = deletefile(fd, delete);
 		goto out;
 	}
+
+	if (reboot)
+		ret = reboot_kbd(fd);
 out:
 	close(fd);
 	return ret;
