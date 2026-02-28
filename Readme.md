@@ -9,9 +9,10 @@ I don't have a locked keyboard and don't want to lock it, but it would be intere
 whether this tool also works when the keyboard is PIN locked or the Setup menu is
 disabled.
 
-In order to use the tool, the keyboard needs to be connected via the serial Host Port
-(A or B, I only used HPA). The serial host port A is available at the 15-pin Misc Port
-on the connector Box, Pin 10 is TXD, Pin 11 is RXD.
+In order to use the tool the keyboard needs to be connected via the serial Host Port
+(A or B, I only used HPA), or via the USB connector on the Keyboard. The serial host
+port A is available at the 15-pin Misc Port on the connector Box, Pin 10 is TXD, Pin
+11 is RXD. If the keyboard is connected via USB, no -D option should be given to weytool.
 
 If the keyboard is used without a Connector Box, the HPA signals are the CN36 connector
 at Pin 3 (RXD) and Pin 21(TXD).

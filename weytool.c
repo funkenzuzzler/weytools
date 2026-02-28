@@ -627,12 +627,14 @@ int main(int argc, char **argv)
 			 break;
 		 case 'h':
 			 fprintf(stderr, "%s: usage:%s <options>\n"
-				 "-d, --device            serial device\n"
+				 "-D, --device            serial device\n"
 				 "-b, --baud,-b           baud rate\n"
 				 "-l, --list              list files on keyboard\n"
 				 "-w, --write <file>      upload file to keyboard\n"
 				 "-r, --read <file>       download file from keyboard\n"
-				 "-R, --reboot            reboot keyboard\n",
+				 "-d, --delete <file>     delete file from keyboard\n"
+				 "-R, --reboot            reboot keyboard\n"
+				 "-v, --verbose           Log data transfers\n",
 				 argv[0], argv[0]);
 			 return 0;
 		 default:
