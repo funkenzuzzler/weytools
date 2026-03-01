@@ -26,6 +26,11 @@ typedef enum {
 	HP_CMD_LISTFILES=0xa9,
 } hp_cmds_t;
 
+typedef enum {
+	OPT_RAWCMD = 0x100,
+	OPT_RAWRX,
+} optnum_t;
+
 struct option options[] = {
 	{ "device", required_argument, 0, 'D' },
 	{ "baud", required_argument,   0, 'b' },
@@ -35,6 +40,8 @@ struct option options[] = {
 	{ "delete", required_argument, 0, 'd' },
 	{ "reboot", no_argument,       0, 'R' },
 	{ "verbose", no_argument,      0, 'v' },
+	{ "rawcmd", required_argument, 0, OPT_RAWCMD },
+	{ "rawrx", required_argument,  0, OPT_RAWRX },
 };
 
 struct cmd_listfiles {
@@ -195,6 +202,9 @@ static int read_keyboard(void *buf, size_t count)
 
 	if (kbfd != -1)
 		return read_serial(kbfd, buf, count);
+
+	if (count > sizeof(tmpbuf))
+		count = sizeof(tmpbuf);
 
 	while(rxavailable < count) {
 		ret = libusb_bulk_transfer(usbdev, 0x85, tmpbuf + rxavailable,
@@ -486,7 +496,6 @@ static int writefile(char *spec)
 	struct stat statbuf;
 	ssize_t total;
 
-
 	if (sscanf(spec, "LAYER%02d.LAY", &subindex) == 1) {
 		index = 9;
 		strcpy(input, spec);
@@ -569,6 +578,35 @@ static int reboot_kbd(void)
 	return 0;
 }
 
+static int rawtx(uint8_t *buf, int size)
+{
+	return write_keyboard(buf, size);
+}
+
+static int rawrx(int size)
+{
+	char *buf;
+	int ret;
+
+	if (size > 1048576) {
+		fprintf(stderr, "%s: size exceeds limit of 1MB\n", __func__);
+		return -1;
+	}
+	buf = malloc(size);
+	if (!buf) {
+		fprintf(stderr, "%s: failed to allocate rx buffer\n", __func__);
+		return -1;
+	}
+	ret = read_keyboard(buf, size);
+	if (ret) {
+		free(buf);
+		return ret;
+	}
+	hexdump("RX", buf, size);
+	free(buf);
+	return 0;
+}
+
 static libusb_device_handle *open_keyboard_usb(struct libusb_context *ctx, int id)
 {
 	libusb_device_handle *dev = libusb_open_device_with_vid_pid(ctx, 0x0744, id);
@@ -588,14 +626,41 @@ static libusb_device_handle *open_keyboard_usb(struct libusb_context *ctx, int i
 	return dev;
 }
 
+static uint8_t *parse_rawcmd(char *arg, int *rawcount)
+{
+	char *endp, *p, *_arg = arg;
+	static uint8_t buf[128];
+	size_t cnt = 0;
+
+	*rawcount = 0;
+
+	while ((p = strtok(_arg, ";,"))) {
+		buf[cnt++] = strtoul(p, &endp, 16);
+		if (*endp) {
+			fprintf(stderr, "%s: failed to parse `%s'\n", __func__, endp);
+			return NULL;
+		}
+
+		if (cnt > sizeof(buf)) {
+			fprintf(stderr, "%s: raw cmd list exceeds size of %ld bytes\n",
+				__func__, sizeof(buf));
+			return NULL;
+		}
+		_arg = NULL;
+	}
+	*rawcount = cnt;
+	return buf;
+}
+
 int main(int argc, char **argv)
 {
-	int list = 0, optidx, opt, baud = 115200;
 	char *device = NULL, *endp, *write = NULL, *read = NULL, *delete = NULL;
-	int ret = 1, reboot = 0;
+	int list = 0, optidx, opt, baud = 115200;
 	struct libusb_context *ctx = NULL;
+	int ret = 1, reboot = 0, rawtxsize = 0, rawrxsize = 0;
+	uint8_t *rawlist;
 
-	while ((opt = getopt_long(argc, argv, "vRlD:d:b:w:r:", options, &optidx)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hvRlD:d:b:w:r:", options, &optidx)) != -1) {
 		 switch (opt) {
 		 case 'D':
 			 device = optarg;
@@ -625,6 +690,18 @@ int main(int argc, char **argv)
 		 case 'R':
 			 reboot = 1;
 			 break;
+		 case OPT_RAWCMD:
+			 rawlist = parse_rawcmd(optarg, &rawtxsize);
+			 if (!rawlist)
+				 return 1;
+			 break;
+		 case OPT_RAWRX:
+			 rawrxsize = strtoul(optarg, &endp, 10);
+			 if (*endp) {
+				 fprintf(stderr, "invalid raw RX size: %s\n", optarg);
+				 return 1;
+			 }
+			 break;
 		 case 'h':
 			 fprintf(stderr, "%s: usage:%s <options>\n"
 				 "-D, --device            serial device\n"
@@ -634,7 +711,9 @@ int main(int argc, char **argv)
 				 "-r, --read <file>       download file from keyboard\n"
 				 "-d, --delete <file>     delete file from keyboard\n"
 				 "-R, --reboot            reboot keyboard\n"
-				 "-v, --verbose           Log data transfers\n",
+				 "-v, --verbose           log data transfers\n"
+				 "    --rawcmd <hexbytes> send raw cmd to keyboard\n"
+				 "    --rawrx <len>       receive raw response from keyboard\n",
 				 argv[0], argv[0]);
 			 return 0;
 		 default:
@@ -672,22 +751,38 @@ int main(int argc, char **argv)
 
 	if (list) {
 		ret = listfiles();
-		goto out;
+		if (ret == -1)
+			goto out;
 	}
 
 	if (delete) {
 		ret = deletefile(delete);
-		goto out;
+		if (ret == -1)
+			goto out;
 	}
 
 	if (read) {
 		ret = readfile(read);
-		goto out;
+		if (ret == -1)
+			goto out;
 	}
 
 	if (write) {
 		ret = writefile(write);
+		if (ret == -1)
+			goto out;
+	}
+
+	if (rawtxsize) {
+		ret = rawtx(rawlist, rawtxsize);
+		if (ret == -1)
 		goto out;
+	}
+
+	if (rawrxsize) {
+		ret = rawrx(rawrxsize);
+		if (ret == -1)
+			goto out;
 	}
 
 	if (reboot)
@@ -698,5 +793,5 @@ out_release:
 out:
 	if (kbfd != -1)
 		close(kbfd);
-	return ret;
+	return ret == 0 ? 0 : 1;
 }
