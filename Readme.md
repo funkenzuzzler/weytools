@@ -133,6 +133,18 @@ HPA commands:
 7a RR GG BB?                              some color fill
 7d RS                                     set res line R - line, S - state mask
 7a RR GG BB                               fill lcd
+a0 40                                     download connectorbox firmware file
+a0 54                                     download bmp file
+a0 50                                     download layer file?
+a0 51                                     download layer file?
+a0 52                                     download layer file?
+a0 56                                     download wav file
+a0 57                                     download setup file?
+a0 5a                                     download kct file?
+a0 5b                                     download usertext
+a0 5c <32 '00' bytes>                     clear global pin
+a0 60                                     another bmp download
+a0 61                                     download buzzer patterns?
 a2 <magic:2> <idx:2> <len:4>              Download graphics / colorparm?
                                           magic = a054 BMP
                                                   0101 COLORPARM
@@ -163,12 +175,10 @@ a9 00 00 00                               Get Directory listing
                                           03 - Prev/Next
                                           04 - Num Lock
 7f 30 XX <null terminated string>         print text on lcd
-7f 40                                     connector box update?
 7f 41 VV PP                               beep, VV = 0..11 Volume, 255 = User set volume, PP = pattern
 7f 52                                     dump layer config
 7f 5a                                     dump kct file
 7f 5b                                     dump user text page
-7f 5c                                     dump pin file
 7f 5c                                     test status
 7f 5d                                     info page
 7f 5e                                     dump macros
